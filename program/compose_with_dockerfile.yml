@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  heap_overflow:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      network: host
+    ports:
+      - "5000:5000"
+ 

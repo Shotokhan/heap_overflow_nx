@@ -1,0 +1,67 @@
+Bisogna exploitarlo con l'ASLR attivo e possibilmente facendo reverse engineering, quindi senza guardare il codice sorgente.
+
+La prima cosa da notare è che viene fatta la malloc della struttura delle funzioni ogni volta che si cambia lingua, senza fare la free.
+Questa cosa non vale invece per il nome, che resta sempre nello stesso chunk.
+Inizialmente, si trova prima il chunk delle funzioni e poi quello del nome; tuttavia, se si cambia lingua, si ha il chunk delle funzioni dopo quello del nome.
+
+A tal punto, seguendo questo flusso:
+
+Scelta lingua
+Scelta nome
+Cambio lingua
+Cambio nome
+
+E' possibile sovrascrivere il puntatore a funzione relativo al "greeting", che è il saluto (in italiano o in inglese), che prende in input il buffer in cui è presente il nome.
+Infatti, se seguendo il flusso si mette in input abbastanza lungo, visto che c'è buffer overflow [ scanf("%s", d->name) ] si può osservare un segmentation fault.
+Ora, con questo heap overflow si controlla direttamente EIP: viene effettuata "call rax", ed rax è sotto il nostro controllo; il primo parametro è passato in rdx, ed è il nostro buffer.
+Se l'heap è eseguibile è sufficiente cercare un gadget "jmp rdx" all'interno del programma.
+
+In gdb: break *0x400921
+
+In 0x0000000000400667 si trova "jmp rdx".
+
+aaaabaaacaaadaaaeaaafaaagaaahaaaiaaajaaakaaalaaamaaanaaaoaaapaaaqaaaraaasaaataaauaaavaaawaaaxaaayaaazaabbaabcaabdaabeaabfaabgaabhaabiaabjaabkaablaabmaabnaaboaabpaabqaabraabsaabtaabuaabvaabwaabxaabyaab
+
+L'offset è 144.
+
+Tuttavia, l'heap non è eseguibile.
+
+Allora mettiamo una win function che chiama system con un parametro, e saltiamo lì.
+
+In gdb: break *0x00000000004009c9
+
+
+------ 
+Interessante anche provare a fare l'exploit senza la win function; serve libc, per cui lo prendo da ubuntu (vedo qual è con ldd) e poi:
+
+$ patchelf --set-interpreter ./ld-2.19.so --add-needed ./libc-2.19.so ./heappy
+
+Si può usare il buffer overflow per settare la function a printf e poi mettere come nome %13$p, ottenendo un libc leak mediante format string attack.
+Tuttavia, data la situazione (JOP), anche con un libc leak sembrerebbe molto complesso ottenere una shell senza un one-gadget rce funzionante.
+
+Posso ad esempio ritornare a sys_execve, però devo preparare bene il buffer per rdi, che punterà al filename (e fin qui è okay), e poi devo trovare un modo per settare rsi ed rdx o a valori NULL o fare in modo che arrivino al buffer mediante una doppia dereferenziazione.
+In alternativa potrei usare la format string per fare leakage anche degli indirizzi dell'heap, e mettere all'inizio del buffer un self-pointer del buffer, in modo da avere rsi ed rdx settati e dover aggiustare solo rdi (nota: se l'exploitation fosse privilege escalation locale, a tal punto mi basterebbe creare un symbolic link, senza dover aggiustare rdi).
+
+Ancora, in alternativa si può fare stack pivoting, settando l'heap come nuovo stack; anche in questo caso servono i gadget appropriati.
+
+Alla fine sono riuscito ad exploitarlo usando un one_gadget_rce che ha il constraint [rsp + 0x30] == NULL; tale constraint non è rispettato di default, ma lo si può far rispettare facendo prima una pop. Ho trovato a tal proposito il seguente JOP gadget:
+pop rax ; xor al, 0xed ; jmp qword ptr [rdx]
+
+Quindi ora devo ricompilare il programma senza win function, e modificare l'exploit opportunamente.
+L'unica modifica da fare è mandare un byte in meno con l'overflow, visto che la scanf mette un null byte in più; prima non mi ero accorto di questo difetto perché evidentemente il byte più significativo della funzione che si trovava dopo nell'heap era già 0.
+Tuttavia anche così ci sono dei caratteri che per qualche motivo vengono filtrati in remoto.
+
+Dunque cambiamo il formato di challenge a boot2root.
+Qui però sorge un altro problema... la execve droppa i privilegi, quindi la challenge non può che essere remota.
+
+Dopo ore di tentativi, capisco che il problema in remoto è che il programma è servito tramite TTY, e per questo alcuni caratteri vengono stripped oppure vengono modificati.
+Un link utile: https://stackoverflow.com/questions/46329447/write-non-ascii-characters-to-stdin-of-a-progam-on-a-tty-over-ssh
+
+In pratica bisogna fare "wrapping" dei caratteri filtrati con byte \x16, che sarà stripped dal terminale TTY e permetterà di consegnare all'applicazione il byte raw.
+
+Side note: avevo provato a servire il programma anche come un terminale SSH, quindi nel Dockerfile cambiavo /etc/passwd di root settandolo al programma heappy; in questo caso, per interagire da script bypassando la parte in cui si immette la password ed ottenendo comunque un terminale TTY, si può fare:
+r = process(["sshpass", "-p", "root", "ssh", "-tt", "root@localhost", "-p", "5000"])
+
+Per non complicare troppo le cose, che già sono complicate, il programma sarà servito semplicemente su terminale TTY, senza SSH, su porta 5000.
+
+
